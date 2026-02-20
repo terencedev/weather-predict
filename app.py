@@ -272,7 +272,7 @@ def chart_section(df: pd.DataFrame) -> None:
                 title="Top 20 warmest countries (average)",
             )
             fig_country.update_layout(xaxis_title="Country", yaxis_title="Temperature (C)")
-            st.plotly_chart(fig_country, use_container_width=True)
+            st.plotly_chart(fig_country, width="stretch")
         else:
             st.info("Required columns not found for country temperature chart.")
 
@@ -282,7 +282,7 @@ def chart_section(df: pd.DataFrame) -> None:
             condition_counts = df["condition_text"].value_counts().head(10).reset_index()
             condition_counts.columns = ["condition_text", "count"]
             fig_pie = px.pie(condition_counts, values="count", names="condition_text", hole=0.35)
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width="stretch")
         else:
             st.info("Required column not found for condition chart.")
 
@@ -319,7 +319,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
             title="PM2.5 Distribution",
             labels={target_col: "PM2.5"},
         )
-        st.plotly_chart(fig_hist, use_container_width=True)
+        st.plotly_chart(fig_hist, width="stretch")
 
     with top_right:
         if "country" in pm_df.columns:
@@ -338,7 +338,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                 title="Top 15 Countries by Average PM2.5",
                 labels={target_col: "Avg PM2.5"},
             )
-            st.plotly_chart(fig_country_pm, use_container_width=True)
+            st.plotly_chart(fig_country_pm, width="stretch")
         else:
             st.info("Country column not found for PM2.5 country ranking.")
 
@@ -358,7 +358,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                 hole=0.45,
                 title="PM2.5 Severity Distribution",
             )
-            st.plotly_chart(fig_severity, use_container_width=True)
+            st.plotly_chart(fig_severity, width="stretch")
         else:
             st.info("PM2.5 severity distribution unavailable.")
 
@@ -378,7 +378,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                 labels={scatter_feature: scatter_feature.replace("_", " ").title(), target_col: "PM2.5"},
                 opacity=0.45,
             )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            st.plotly_chart(fig_scatter, width="stretch")
         else:
             st.info("No numeric weather feature available for PM2.5 comparison scatter.")
 
@@ -400,7 +400,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                     title="Daily Average PM2.5 Trend",
                     labels={"date_only": "Date", target_col: "Avg PM2.5"},
                 )
-                st.plotly_chart(fig_trend, use_container_width=True)
+                st.plotly_chart(fig_trend, width="stretch")
             else:
                 st.info("No valid timestamps available for PM2.5 trend.")
         else:
@@ -411,7 +411,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
             geo_df = pm_df.dropna(subset=["latitude", "longitude"]).copy()
             if not geo_df.empty:
                 geo_sample = geo_df.sample(min(len(geo_df), 5000), random_state=42)
-                fig_geo = px.scatter_mapbox(
+                fig_geo = px.scatter_map(
                     geo_sample,
                     lat="latitude",
                     lon="longitude",
@@ -422,9 +422,9 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                     title="PM2.5 Geographic Distribution",
                     color_continuous_scale="YlOrRd",
                     zoom=1,
-                    mapbox_style="carto-positron",
+                    map_style="carto-positron",
                 )
-                st.plotly_chart(fig_geo, use_container_width=True)
+                st.plotly_chart(fig_geo, width="stretch")
             else:
                 st.info("No latitude/longitude rows available for PM2.5 geo chart.")
         else:
@@ -453,7 +453,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                     title="Top Features Correlated with PM2.5",
                     labels={"feature": "Feature", "abs_corr": "Absolute Correlation"},
                 )
-                st.plotly_chart(fig_corr, use_container_width=True)
+                st.plotly_chart(fig_corr, width="stretch")
             else:
                 st.info("Correlation chart unavailable.")
         else:
@@ -491,7 +491,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                         title="Country vs Month PM2.5 Heatmap",
                         labels={"x": "Month", "y": "Country", "color": "Avg PM2.5"},
                     )
-                    st.plotly_chart(fig_heat, use_container_width=True)
+                    st.plotly_chart(fig_heat, width="stretch")
                 else:
                     st.info("Heatmap unavailable after filtering.")
             else:
@@ -515,7 +515,7 @@ def table_section(df: pd.DataFrame) -> None:
     ]
     existing_columns = [c for c in preferred_columns if c in df.columns]
 
-    st.dataframe(df[existing_columns] if existing_columns else df, use_container_width=True, hide_index=True)
+    st.dataframe(df[existing_columns] if existing_columns else df, width="stretch", hide_index=True)
 
 
 def find_pm25_target(df: pd.DataFrame) -> str | None:
@@ -637,7 +637,7 @@ def pm25_prediction_tab(df: pd.DataFrame) -> None:
     )
     st.dataframe(
         trained["scores"].rename(columns={"mae": "MAE", "r2": "R2"}).reset_index(drop=True),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -649,7 +649,7 @@ def pm25_prediction_tab(df: pd.DataFrame) -> None:
         labels={"actual": "Actual PM2.5", "predicted": "Predicted PM2.5"},
         opacity=0.5,
     )
-    st.plotly_chart(comparison_fig, use_container_width=True)
+    st.plotly_chart(comparison_fig, width="stretch")
 
     st.markdown("### Predict a single sample")
     X = trained["X"]

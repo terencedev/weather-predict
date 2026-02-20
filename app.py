@@ -24,6 +24,22 @@ st.set_page_config(page_title="Global Weather Dashboard", page_icon="🌍", layo
 DEFAULT_CSV_PATH = Path("data/GlobalWeatherRepository-processed.csv")
 PM25_TARGET_CANDIDATES = ["air_quality_PM2.5", "air_quality_PM2_5", "PM2.5", "pm2_5", "pm25"]
 AQI_TARGET_CANDIDATES = ["air_quality_us_epa_index", "aqi", "AQI"]
+AQI_CLASS_LABELS = {
+    1: "Good",
+    2: "Moderate",
+    3: "Unhealthy for Sensitive Groups",
+    4: "Unhealthy",
+    5: "Very Unhealthy",
+    6: "Hazardous",
+}
+AQI_CLASS_COLORS = {
+    "Good": "#2ca02c",
+    "Moderate": "#f1c40f",
+    "Unhealthy for Sensitive Groups": "#e67e22",
+    "Unhealthy": "#e74c3c",
+    "Very Unhealthy": "#8e44ad",
+    "Hazardous": "#800000",
+}
 COLUMN_ALIASES = {
     "temperature_c": ["temperature_c", "temperature_celsius"],
     "temperature_f": ["temperature_f", "temperature_fahrenheit"],
@@ -789,6 +805,177 @@ def reference_dashboard_section(df: pd.DataFrame) -> None:
                     st.info("Country column not found for AQI country chart.")
 
 
+def tourism_planner_tab(df: pd.DataFrame) -> None:
+    st.subheader("Tourism Planner")
+    st.caption("Rank cities and months by travel comfort using temperature, humidity, and PM2.5.")
+
+    pm25_col = find_pm25_target(df)
+    if pm25_col is None:
+        st.warning("PM2.5 column is required for tourism comfort scoring.")
+        return
+
+    required = [pm25_col]
+    optional = ["temperature_c", "humidity", "country", "location_name", "last_updated"]
+    planner_df = df.copy()
+    missing_required = [c for c in required if c not in planner_df.columns]
+    if missing_required:
+        st.warning(f"Missing required columns: {', '.join(missing_required)}")
+        return
+
+    if "location_name" not in planner_df.columns:
+        planner_df["location_name"] = planner_df.get("country", "Unknown")
+
+    metric_cols = [c for c in ["temperature_c", "humidity", pm25_col] if c in planner_df.columns]
+    planner_df = planner_df.dropna(subset=metric_cols).copy()
+    if planner_df.empty:
+        st.warning("No rows available after dropping missing values for tourism scoring.")
+        return
+
+    if "last_updated" in planner_df.columns and pd.api.types.is_datetime64_any_dtype(planner_df["last_updated"]):
+        planner_df["visit_month"] = planner_df["last_updated"].dt.to_period("M").astype(str)
+    else:
+        planner_df["visit_month"] = "All"
+
+    left, right = st.columns(2)
+    with left:
+        preferred_temp_range = st.slider(
+            "Preferred temperature range (C)",
+            min_value=0,
+            max_value=45,
+            value=(20, 28),
+        )
+        preferred_humidity_range = st.slider(
+            "Preferred humidity range (%)",
+            min_value=10,
+            max_value=100,
+            value=(35, 65),
+        )
+    with right:
+        preferred_pm25_max = st.slider("Preferred max PM2.5", min_value=5.0, max_value=100.0, value=35.4, step=0.1)
+        top_n = st.slider("Top cities to show", min_value=5, max_value=40, value=20)
+
+    if "country" in planner_df.columns:
+        countries = sorted(planner_df["country"].dropna().astype(str).unique().tolist())
+        selected_countries = st.multiselect("Country filter", options=countries, default=[])
+        if selected_countries:
+            planner_df = planner_df[planner_df["country"].astype(str).isin(selected_countries)]
+
+    months = sorted(planner_df["visit_month"].dropna().astype(str).unique().tolist())
+    selected_months = st.multiselect("Month filter", options=months, default=[])
+    if selected_months:
+        planner_df = planner_df[planner_df["visit_month"].astype(str).isin(selected_months)]
+
+    if planner_df.empty:
+        st.warning("No rows match current tourism filters.")
+        return
+
+    score_cols: list[str] = []
+
+    if "temperature_c" in planner_df.columns:
+        temp_low, temp_high = preferred_temp_range
+        temp_buffer = max(4.0, (float(temp_high) - float(temp_low)) / 2.0)
+        temp_values = planner_df["temperature_c"].astype(float)
+        temp_distance = np.where(
+            temp_values < temp_low,
+            temp_low - temp_values,
+            np.where(temp_values > temp_high, temp_values - temp_high, 0.0),
+        )
+        planner_df["temp_score"] = np.clip(1.0 - (temp_distance / temp_buffer), 0.0, 1.0)
+        score_cols.append("temp_score")
+
+    if "humidity" in planner_df.columns:
+        hum_low, hum_high = preferred_humidity_range
+        hum_buffer = max(10.0, (float(hum_high) - float(hum_low)) / 2.0)
+        hum_values = planner_df["humidity"].astype(float)
+        hum_distance = np.where(
+            hum_values < hum_low,
+            hum_low - hum_values,
+            np.where(hum_values > hum_high, hum_values - hum_high, 0.0),
+        )
+        planner_df["humidity_score"] = np.clip(1.0 - (hum_distance / hum_buffer), 0.0, 1.0)
+        score_cols.append("humidity_score")
+
+    pm25_buffer = max(10.0, float(preferred_pm25_max) * 0.75)
+    pm25_distance = np.maximum(planner_df[pm25_col].astype(float) - float(preferred_pm25_max), 0.0)
+    planner_df["pm25_score"] = np.clip(1.0 - (pm25_distance / pm25_buffer), 0.0, 1.0)
+    score_cols.append("pm25_score")
+
+    planner_df["comfort_score"] = planner_df[score_cols].mean(axis=1) * 100.0
+
+    summary = (
+        planner_df.groupby(["location_name", "visit_month"], as_index=False)
+        .agg(
+            comfort_score=("comfort_score", "mean"),
+            avg_temp=("temperature_c", "mean") if "temperature_c" in planner_df.columns else (pm25_col, "size"),
+            avg_humidity=("humidity", "mean") if "humidity" in planner_df.columns else (pm25_col, "size"),
+            avg_pm25=(pm25_col, "mean"),
+            rows=(pm25_col, "size"),
+            country=("country", "first") if "country" in planner_df.columns else ("location_name", "first"),
+        )
+        .sort_values("comfort_score", ascending=False)
+    )
+
+    top = summary.head(top_n).copy()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Best City-Month Score", f"{top['comfort_score'].max():.1f}" if not top.empty else "N/A")
+    c2.metric("Avg Score (Filtered)", f"{summary['comfort_score'].mean():.1f}" if not summary.empty else "N/A")
+    c3.metric("Rows Used", f"{len(planner_df):,}")
+
+    top["label"] = top["location_name"].astype(str) + " (" + top["visit_month"].astype(str) + ")"
+    fig_rank = px.bar(
+        top.sort_values("comfort_score", ascending=True),
+        x="comfort_score",
+        y="label",
+        orientation="h",
+        color="avg_pm25",
+        color_continuous_scale="YlGnBu_r",
+        title="Best City-Month Combinations",
+        labels={"comfort_score": "Comfort Score", "label": "City (Month)", "avg_pm25": "Avg PM2.5"},
+        hover_data={"country": True, "avg_temp": ":.1f", "avg_humidity": ":.1f", "rows": True},
+    )
+    st.plotly_chart(fig_rank, use_container_width=True)
+
+    city_month = (
+        summary.sort_values("rows", ascending=False)
+        .groupby("location_name", as_index=False)
+        .head(1)
+        .sort_values("comfort_score", ascending=False)
+        .head(min(top_n, 15))
+    )
+    if not city_month.empty:
+        fig_scatter = px.scatter(
+            city_month,
+            x="avg_pm25",
+            y="comfort_score",
+            size="rows",
+            color="country" if "country" in city_month.columns else None,
+            hover_name="location_name",
+            title="Comfort Score vs PM2.5 (Top Cities)",
+            labels={"avg_pm25": "Avg PM2.5", "comfort_score": "Comfort Score"},
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+    st.dataframe(
+        top[
+            ["location_name", "country", "visit_month", "comfort_score", "avg_temp", "avg_humidity", "avg_pm25", "rows"]
+        ].rename(
+            columns={
+                "location_name": "City",
+                "country": "Country",
+                "visit_month": "Month",
+                "comfort_score": "Comfort Score",
+                "avg_temp": "Avg Temp (C)",
+                "avg_humidity": "Avg Humidity",
+                "avg_pm25": "Avg PM2.5",
+                "rows": "Observations",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 @st.cache_resource(show_spinner=False)
 def train_epa_index_classifier(df: pd.DataFrame) -> dict[str, Any]:
     aqi_col = find_aqi_target(df)
@@ -797,8 +984,9 @@ def train_epa_index_classifier(df: pd.DataFrame) -> dict[str, Any]:
 
     model_df = df.copy()
     aqi_vals = pd.to_numeric(model_df[aqi_col], errors="coerce").clip(lower=1, upper=6).round()
-    model_df["aqi_class"] = aqi_vals.astype("Int64").astype(str)
-    model_df = model_df[model_df["aqi_class"] != "<NA>"].copy()
+    model_df["aqi_code"] = aqi_vals.astype("Int64")
+    model_df["aqi_class"] = model_df["aqi_code"].map(AQI_CLASS_LABELS)
+    model_df = model_df.dropna(subset=["aqi_class"]).copy()
 
     if len(model_df) < 300:
         raise ValueError("Not enough labeled rows for EPA classification.")
@@ -849,17 +1037,35 @@ def train_epa_index_classifier(df: pd.DataFrame) -> dict[str, Any]:
     classifier.fit(X_train, y_train)
     predictions = classifier.predict(X_test)
 
+    class_counts = (
+        y.value_counts()
+        .rename_axis("class")
+        .reset_index(name="count")
+    )
+    class_counts["order"] = class_counts["class"].map({v: k for k, v in AQI_CLASS_LABELS.items()})
+    class_counts = class_counts.sort_values("order").drop(columns=["order"])
+
     return {
+        "model": classifier,
         "accuracy": accuracy_score(y_test, predictions),
         "f1_macro": f1_score(y_test, predictions, average="macro"),
         "actual_vs_pred": pd.DataFrame({"actual": y_test.values, "predicted": predictions}),
-        "class_counts": y.value_counts().sort_index().rename_axis("class").reset_index(name="count"),
+        "class_counts": class_counts,
+        "X": X,
+        "defaults": {
+            col: (
+                float(X[col].median())
+                if pd.api.types.is_numeric_dtype(X[col])
+                else (X[col].dropna().astype(str).mode().iloc[0] if not X[col].dropna().empty else "")
+            )
+            for col in X.columns
+        },
     }
 
 
 def epa_index_classifier_tab(df: pd.DataFrame) -> None:
     st.subheader("EPA Index Classifier")
-    st.caption("Multiclass classification for `air_quality_us_epa_index` (classes 1-6).")
+    st.caption("Multiclass classification for AQI categories (color-coded).")
 
     try:
         with st.spinner("Training EPA index classifier..."):
@@ -872,11 +1078,25 @@ def epa_index_classifier_tab(df: pd.DataFrame) -> None:
     c1.metric("Accuracy", f"{trained['accuracy']:.3f}")
     c2.metric("F1 (macro)", f"{trained['f1_macro']:.3f}")
 
+    top_class_row = trained["class_counts"].sort_values("count", ascending=False).iloc[0]
+    top_label = str(top_class_row["class"])
+    top_color = AQI_CLASS_COLORS.get(top_label, "#444444")
+    st.markdown(
+        (
+            f"<div style='padding:10px 14px;border-radius:8px;background:{top_color};"
+            "color:white;font-weight:700;'>Overall AQI Label: "
+            f"{top_label}</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
     st.plotly_chart(
         px.bar(
             trained["class_counts"],
             x="class",
             y="count",
+            color="class",
+            color_discrete_map=AQI_CLASS_COLORS,
             title="EPA Class Distribution",
             labels={"class": "EPA Class", "count": "Rows"},
         ),
@@ -884,135 +1104,86 @@ def epa_index_classifier_tab(df: pd.DataFrame) -> None:
     )
 
     compare = trained["actual_vs_pred"].copy()
+    compare["predicted_class"] = compare["predicted"]
     compare["pair"] = compare["actual"] + " -> " + compare["predicted"]
-    pair_counts = compare["pair"].value_counts().head(20).rename_axis("pair").reset_index(name="count")
+    pair_counts = (
+        compare.groupby(["pair", "predicted_class"], as_index=False)
+        .size()
+        .rename(columns={"size": "count"})
+        .sort_values("count", ascending=False)
+        .head(20)
+    )
     st.plotly_chart(
         px.bar(
             pair_counts.sort_values("count", ascending=True),
             x="count",
             y="pair",
             orientation="h",
+            color="predicted_class",
+            color_discrete_map=AQI_CLASS_COLORS,
             title="Top Outcomes (Actual -> Predicted)",
-            labels={"count": "Rows", "pair": "Outcome"},
+            labels={"count": "Rows", "pair": "Outcome", "predicted_class": "Predicted Class"},
         ),
         use_container_width=True,
     )
 
+    st.markdown("### Predict a Single Sample")
+    X = trained["X"]
+    preferred_inputs = [
+        "temperature_c",
+        "humidity",
+        "wind_kph",
+        "pressure_mb",
+        "precip_mm",
+        "uv",
+        "cloud",
+        "visibility_km",
+        "condition_text",
+        "country",
+        "location_name",
+    ]
+    input_columns = [c for c in preferred_inputs if c in X.columns]
+    if not input_columns:
+        input_columns = X.columns.tolist()[:10]
 
-@st.cache_resource(show_spinner=False)
-def train_unhealthy_risk_classifier(df: pd.DataFrame, threshold: float) -> dict[str, Any]:
-    pm25_col = find_pm25_target(df)
-    if pm25_col is None:
-        raise ValueError("No PM2.5 column available for risk classification.")
+    with st.form("epa_predict_form"):
+        sample: dict[str, Any] = {}
+        for col in input_columns:
+            if pd.api.types.is_numeric_dtype(X[col]):
+                sample[col] = st.number_input(col, value=float(X[col].median()))
+            else:
+                options = X[col].dropna().astype(str).value_counts().head(30).index.tolist()
+                if not options:
+                    options = [""]
+                sample[col] = st.selectbox(col, options=options)
+        submitted = st.form_submit_button("Predict AQI Class")
 
-    model_df = df.copy()
-    pm25_vals = pd.to_numeric(model_df[pm25_col], errors="coerce")
-    model_df = model_df[pm25_vals.notna()].copy()
-    model_df["risk_label"] = np.where(pm25_vals[pm25_vals.notna()] > threshold, "Unhealthy", "Healthy")
-
-    if len(model_df) < 300:
-        raise ValueError("Not enough rows for risk classification.")
-    if model_df["risk_label"].nunique() < 2:
-        raise ValueError("Only one class present after thresholding. Change threshold.")
-
-    excluded = {"risk_label", pm25_col, "last_updated", "sunrise", "sunset", "moonrise", "moonset"}
-    aqi_col = find_aqi_target(model_df)
-    if aqi_col is not None:
-        excluded.add(aqi_col)
-
-    feature_df = model_df[[c for c in model_df.columns if c not in excluded]].copy()
-    numeric_cols = feature_df.select_dtypes(include=["number"]).columns.tolist()
-    categorical_cols = feature_df.select_dtypes(include=["object", "category"]).columns.tolist()
-    categorical_cols = [c for c in categorical_cols if feature_df[c].nunique(dropna=True) <= 100]
-
-    selected_cols = numeric_cols + categorical_cols
-    if not selected_cols:
-        raise ValueError("No usable features available for risk classification.")
-
-    X = feature_df[selected_cols]
-    y = model_df["risk_label"].astype(str)
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), numeric_cols),
-            (
-                "cat",
-                Pipeline(
-                    [
-                        ("imputer", SimpleImputer(strategy="most_frequent")),
-                        ("encoder", OneHotEncoder(handle_unknown="ignore")),
-                    ]
+    if submitted:
+        input_row = pd.DataFrame([sample])
+        for col in X.columns:
+            if col not in input_row.columns:
+                input_row[col] = trained["defaults"].get(col, np.nan)
+        input_row = input_row[X.columns]
+        try:
+            predicted_label = str(trained["model"].predict(input_row)[0])
+            color = AQI_CLASS_COLORS.get(predicted_label, "#333333")
+            confidence_text = ""
+            if hasattr(trained["model"], "predict_proba"):
+                probs = trained["model"].predict_proba(input_row)[0]
+                classes = trained["model"].classes_
+                idx = int(np.argmax(probs))
+                confidence_text = f" (confidence: {probs[idx]:.1%})"
+            st.markdown(
+                (
+                    f"<div style='padding:10px 14px;border-radius:8px;background:{color};"
+                    "color:white;font-weight:700;'>Predicted AQI Class: "
+                    f"{predicted_label}{confidence_text}</div>"
                 ),
-                categorical_cols,
-            ),
-        ]
-    )
+                unsafe_allow_html=True,
+            )
+        except Exception as exc:
+            st.error(f"AQI class prediction failed: {exc}")
 
-    classifier = Pipeline(
-        steps=[
-            ("preprocessor", preprocessor),
-            ("model", RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)),
-        ]
-    )
-    classifier.fit(X_train, y_train)
-    predictions = classifier.predict(X_test)
-
-    return {
-        "accuracy": accuracy_score(y_test, predictions),
-        "f1_macro": f1_score(y_test, predictions, average="macro"),
-        "actual_vs_pred": pd.DataFrame({"actual": y_test.values, "predicted": predictions}),
-        "class_counts": y.value_counts().rename_axis("class").reset_index(name="count"),
-    }
-
-
-def unhealthy_risk_classifier_tab(df: pd.DataFrame) -> None:
-    st.subheader("Unhealthy Risk Classifier")
-    st.caption("Binary classification for PM2.5 unhealthy risk.")
-    threshold = st.selectbox(
-        "Risk threshold (PM2.5)",
-        options=[35.4, 55.4],
-        index=1,
-        help="35.4 = USG threshold, 55.4 = Unhealthy threshold.",
-    )
-
-    try:
-        with st.spinner("Training unhealthy risk classifier..."):
-            trained = train_unhealthy_risk_classifier(df, float(threshold))
-    except Exception as exc:
-        st.warning(f"Risk classifier unavailable: {exc}")
-        return
-
-    c1, c2 = st.columns(2)
-    c1.metric("Accuracy", f"{trained['accuracy']:.3f}")
-    c2.metric("F1 (macro)", f"{trained['f1_macro']:.3f}")
-
-    st.plotly_chart(
-        px.bar(
-            trained["class_counts"],
-            x="class",
-            y="count",
-            title=f"Risk Class Distribution (threshold {threshold})",
-            labels={"class": "Class", "count": "Rows"},
-        ),
-        use_container_width=True,
-    )
-
-    compare = trained["actual_vs_pred"].copy()
-    compare["pair"] = compare["actual"] + " -> " + compare["predicted"]
-    pair_counts = compare["pair"].value_counts().rename_axis("pair").reset_index(name="count")
-    st.plotly_chart(
-        px.bar(
-            pair_counts.sort_values("count", ascending=True),
-            x="count",
-            y="pair",
-            orientation="h",
-            title="Prediction Outcomes (Actual -> Predicted)",
-            labels={"count": "Rows", "pair": "Outcome"},
-        ),
-        use_container_width=True,
-    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -1200,7 +1371,7 @@ def main() -> None:
 
     if df is None:
         st.info(
-            "No dataset loaded yet. Put the Kaggle CSV at `data/GlobalWeatherRepository.csv` or upload it from the sidebar."
+            f"No dataset loaded yet. Expected local file at `{DEFAULT_CSV_PATH}`."
         )
         return
 
@@ -1210,8 +1381,8 @@ def main() -> None:
         st.warning("No rows match the current filters.")
         return
 
-    tab_dashboard, tab_quicksight, tab_predict, tab_epa, tab_risk = st.tabs(
-        ["Dashboard", "QuickSight", "PM2.5 Predictor", "EPA Index Classifier", "Unhealthy Risk Classifier"]
+    tab_dashboard, tab_quicksight, tab_tourism, tab_predict, tab_epa = st.tabs(
+        ["Dashboard", "QuickSight", "Tourism Planner", "PM2.5 Predictor", "EPA Index Classifier"]
     )
 
     with tab_dashboard:
@@ -1226,14 +1397,14 @@ def main() -> None:
         except Exception as exc:
             st.error(f"QuickSight error: {exc}")
 
+    with tab_tourism:
+        tourism_planner_tab(filtered_df)
+
     with tab_predict:
         pm25_prediction_tab(filtered_df)
 
     with tab_epa:
         epa_index_classifier_tab(filtered_df)
-
-    with tab_risk:
-        unhealthy_risk_classifier_tab(filtered_df)
 
 
 if __name__ == "__main__":

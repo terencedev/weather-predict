@@ -10,10 +10,11 @@ import plotly.express as px
 import streamlit as st
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
@@ -22,6 +23,7 @@ st.set_page_config(page_title="Global Weather Dashboard", page_icon="🌍", layo
 
 DEFAULT_CSV_PATH = Path("data/GlobalWeatherRepository-processed.csv")
 PM25_TARGET_CANDIDATES = ["air_quality_PM2.5", "air_quality_PM2_5", "PM2.5", "pm2_5", "pm25"]
+AQI_TARGET_CANDIDATES = ["air_quality_us_epa_index", "aqi", "AQI"]
 COLUMN_ALIASES = {
     "temperature_c": ["temperature_c", "temperature_celsius"],
     "temperature_f": ["temperature_f", "temperature_fahrenheit"],
@@ -72,56 +74,15 @@ def load_data(source: Any) -> pd.DataFrame:
 
 def sidebar_data_source() -> pd.DataFrame | None:
     st.sidebar.header("Data Source")
-    st.sidebar.caption("Use local CSV, AWS endpoint URL, or upload a copy.")
+    st.sidebar.caption("Using default local CSV source.")
 
-    source = st.sidebar.radio(
-        "Choose input",
-        options=["Use local CSV", "Use AWS endpoint URL", "Upload CSV"],
-        index=0,
-    )
+    path = str(DEFAULT_CSV_PATH)
+    st.sidebar.text_input("CSV path", value=path, disabled=True)
 
-    if source == "Use local CSV":
-        local_mode = st.sidebar.radio("Local source", ["Browse file", "Path"], index=0)
-        if local_mode == "Browse file":
-            local_file = st.sidebar.file_uploader("Choose local CSV", type=["csv"], key="local_csv_file")
-            if local_file is None:
-                return None
-            return load_data(local_file)
-
-        path = st.sidebar.text_input("CSV path", value=str(DEFAULT_CSV_PATH))
-        if not path:
-            return None
-        if not os.path.exists(path):
-            st.warning(
-                f"CSV not found at `{path}`. Download the dataset from Kaggle and place it there, or upload the file."
-            )
-            return None
-        return load_data(path)
-
-    if source == "Use AWS endpoint URL":
-        if "aws_csv_url" not in st.session_state:
-            st.session_state["aws_csv_url"] = os.getenv("WEATHER_CSV_URL", "")
-        endpoint_url = st.sidebar.text_input(
-            "CSV URL or S3 URI",
-            key="aws_csv_url",
-            placeholder="https://your-bucket.s3.amazonaws.com/GlobalWeatherRepository.csv",
-            help="Supports HTTP(S) CSV links and s3://bucket/key.csv URIs.",
-        )
-        if not endpoint_url:
-            return None
-        if not endpoint_url.lower().startswith(("http://", "https://", "s3://")):
-            st.error("Use a direct CSV URL (http/https) or s3://bucket/key.csv, not an endpoint name.")
-            return None
-        try:
-            return load_data(endpoint_url)
-        except Exception as exc:
-            st.error(f"Could not load CSV from source: {exc}")
-            return None
-
-    uploaded_file = st.sidebar.file_uploader("Upload Kaggle CSV", type=["csv"])
-    if uploaded_file is None:
+    if not os.path.exists(path):
+        st.warning(f"CSV not found at `{path}`.")
         return None
-    return load_data(uploaded_file)
+    return load_data(path)
 
 
 def build_filters(df: pd.DataFrame) -> pd.DataFrame:
@@ -272,7 +233,7 @@ def chart_section(df: pd.DataFrame) -> None:
                 title="Top 20 warmest countries (average)",
             )
             fig_country.update_layout(xaxis_title="Country", yaxis_title="Temperature (C)")
-            st.plotly_chart(fig_country, width="stretch")
+            st.plotly_chart(fig_country, use_container_width=True)
         else:
             st.info("Required columns not found for country temperature chart.")
 
@@ -282,7 +243,7 @@ def chart_section(df: pd.DataFrame) -> None:
             condition_counts = df["condition_text"].value_counts().head(10).reset_index()
             condition_counts.columns = ["condition_text", "count"]
             fig_pie = px.pie(condition_counts, values="count", names="condition_text", hole=0.35)
-            st.plotly_chart(fig_pie, width="stretch")
+            st.plotly_chart(fig_pie, use_container_width=True)
         else:
             st.info("Required column not found for condition chart.")
 
@@ -319,7 +280,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
             title="PM2.5 Distribution",
             labels={target_col: "PM2.5"},
         )
-        st.plotly_chart(fig_hist, width="stretch")
+        st.plotly_chart(fig_hist, use_container_width=True)
 
     with top_right:
         if "country" in pm_df.columns:
@@ -338,7 +299,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                 title="Top 15 Countries by Average PM2.5",
                 labels={target_col: "Avg PM2.5"},
             )
-            st.plotly_chart(fig_country_pm, width="stretch")
+            st.plotly_chart(fig_country_pm, use_container_width=True)
         else:
             st.info("Country column not found for PM2.5 country ranking.")
 
@@ -358,7 +319,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                 hole=0.45,
                 title="PM2.5 Severity Distribution",
             )
-            st.plotly_chart(fig_severity, width="stretch")
+            st.plotly_chart(fig_severity, use_container_width=True)
         else:
             st.info("PM2.5 severity distribution unavailable.")
 
@@ -378,7 +339,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                 labels={scatter_feature: scatter_feature.replace("_", " ").title(), target_col: "PM2.5"},
                 opacity=0.45,
             )
-            st.plotly_chart(fig_scatter, width="stretch")
+            st.plotly_chart(fig_scatter, use_container_width=True)
         else:
             st.info("No numeric weather feature available for PM2.5 comparison scatter.")
 
@@ -400,7 +361,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                     title="Daily Average PM2.5 Trend",
                     labels={"date_only": "Date", target_col: "Avg PM2.5"},
                 )
-                st.plotly_chart(fig_trend, width="stretch")
+                st.plotly_chart(fig_trend, use_container_width=True)
             else:
                 st.info("No valid timestamps available for PM2.5 trend.")
         else:
@@ -424,7 +385,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                     zoom=1,
                     map_style="carto-positron",
                 )
-                st.plotly_chart(fig_geo, width="stretch")
+                st.plotly_chart(fig_geo, use_container_width=True)
             else:
                 st.info("No latitude/longitude rows available for PM2.5 geo chart.")
         else:
@@ -453,7 +414,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                     title="Top Features Correlated with PM2.5",
                     labels={"feature": "Feature", "abs_corr": "Absolute Correlation"},
                 )
-                st.plotly_chart(fig_corr, width="stretch")
+                st.plotly_chart(fig_corr, use_container_width=True)
             else:
                 st.info("Correlation chart unavailable.")
         else:
@@ -491,7 +452,7 @@ def pm25_visual_section(df: pd.DataFrame) -> None:
                         title="Country vs Month PM2.5 Heatmap",
                         labels={"x": "Month", "y": "Country", "color": "Avg PM2.5"},
                     )
-                    st.plotly_chart(fig_heat, width="stretch")
+                    st.plotly_chart(fig_heat, use_container_width=True)
                 else:
                     st.info("Heatmap unavailable after filtering.")
             else:
@@ -515,7 +476,7 @@ def table_section(df: pd.DataFrame) -> None:
     ]
     existing_columns = [c for c in preferred_columns if c in df.columns]
 
-    st.dataframe(df[existing_columns] if existing_columns else df, width="stretch", hide_index=True)
+    st.dataframe(df[existing_columns] if existing_columns else df, use_container_width=True, hide_index=True)
 
 
 def find_pm25_target(df: pd.DataFrame) -> str | None:
@@ -523,6 +484,535 @@ def find_pm25_target(df: pd.DataFrame) -> str | None:
         if candidate in df.columns:
             return candidate
     return None
+
+
+def find_aqi_target(df: pd.DataFrame) -> str | None:
+    for candidate in AQI_TARGET_CANDIDATES:
+        if candidate in df.columns:
+            return candidate
+    return None
+
+
+def reference_dashboard_section(df: pd.DataFrame) -> None:
+    st.subheader("QuickSight")
+
+    pm25_col = find_pm25_target(df)
+    if pm25_col is None:
+        st.info("PM2.5 column not found. Reference dashboard needs PM2.5 data.")
+        return
+
+    ref_df = df.dropna(subset=[pm25_col]).copy()
+    if ref_df.empty:
+        st.info("No PM2.5 rows available for reference dashboard.")
+        return
+
+    aqi_col = find_aqi_target(ref_df)
+
+    severity_bins = [-float("inf"), 12, 35.4, 55.4, 150.4, 250.4, float("inf")]
+    severity_labels = [
+        "Good",
+        "Moderate",
+        "Unhealthy for Sensitive Groups",
+        "Unhealthy",
+        "Very Unhealthy",
+        "Hazardous",
+    ]
+    ref_df["pm25_severity"] = pd.cut(ref_df[pm25_col], bins=severity_bins, labels=severity_labels)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Average PM2.5 Concentration", f"{ref_df[pm25_col].mean():.2f}")
+    if aqi_col is not None:
+        col2.metric("Average AQI (US EPA)", f"{pd.to_numeric(ref_df[aqi_col], errors='coerce').mean():.2f}")
+    else:
+        col2.metric("Average AQI (US EPA)", "N/A")
+    col3.metric(
+        "% Unhealthy / Hazardous Days",
+        f"{((ref_df[pm25_col] > 55.4).mean() * 100):.2f}",
+    )
+    if "location_name" in ref_df.columns:
+        top_city = (
+            ref_df.groupby("location_name", as_index=False)[pm25_col]
+            .mean()
+            .sort_values(pm25_col, ascending=False)
+            .head(1)
+        )
+        if not top_city.empty:
+            col4.metric("Most Polluted City", f"{top_city.iloc[0]['location_name']} ({top_city.iloc[0][pm25_col]:.1f})")
+        else:
+            col4.metric("Most Polluted City", "N/A")
+    else:
+        col4.metric("Most Polluted City", "N/A")
+
+    row1_left, row1_right = st.columns(2)
+    with row1_left:
+        if {"latitude", "longitude"}.issubset(ref_df.columns):
+            geo_df = ref_df.dropna(subset=["latitude", "longitude"]).copy()
+            if not geo_df.empty:
+                geo_sample = geo_df.sample(min(len(geo_df), 2500), random_state=42)
+                fig_geo = px.scatter_map(
+                    geo_sample,
+                    lat="latitude",
+                    lon="longitude",
+                    color="pm25_severity",
+                    size=pm25_col,
+                    hover_name="location_name" if "location_name" in geo_sample.columns else None,
+                    hover_data={"country": True} if "country" in geo_sample.columns else None,
+                    title="Air Quality Across the World",
+                    map_style="carto-positron",
+                    zoom=1,
+                )
+                st.plotly_chart(fig_geo, use_container_width=True)
+            else:
+                st.info("No latitude/longitude rows available.")
+        else:
+            st.info("Latitude/longitude columns not available.")
+
+    with row1_right:
+        if "air_quality_PM10" in ref_df.columns:
+            scatter_df = ref_df.dropna(subset=["air_quality_PM10", pm25_col]).copy()
+            if not scatter_df.empty:
+                scatter_df = scatter_df.sample(min(len(scatter_df), 2500), random_state=42)
+                fig_pm10 = px.scatter(
+                    scatter_df,
+                    x="air_quality_PM10",
+                    y=pm25_col,
+                    size=pm25_col,
+                    color="pm25_severity",
+                    hover_name="location_name" if "location_name" in scatter_df.columns else None,
+                    title="PM10 vs PM2.5",
+                    labels={"air_quality_PM10": "PM10", pm25_col: "PM2.5"},
+                    opacity=0.6,
+                )
+                st.plotly_chart(fig_pm10, use_container_width=True)
+            else:
+                st.info("No PM10/PM2.5 rows available.")
+        else:
+            st.info("PM10 column not found.")
+
+    row2_left, row2_right = st.columns(2)
+    with row2_left:
+        if "wind_kph" in ref_df.columns:
+            wind_df = ref_df.dropna(subset=["wind_kph", pm25_col]).copy()
+            if not wind_df.empty:
+                wind_sample = wind_df.sample(min(len(wind_df), 2500), random_state=42)
+                fig_wind = px.scatter(
+                    wind_sample,
+                    x=pm25_col,
+                    y="wind_kph",
+                    color="country" if "country" in wind_sample.columns else None,
+                    size=pm25_col,
+                    title="Wind Speed vs PM2.5",
+                    labels={pm25_col: "PM2.5", "wind_kph": "Wind (kph)"},
+                    opacity=0.65,
+                )
+                st.plotly_chart(fig_wind, use_container_width=True)
+            else:
+                st.info("No wind/PM2.5 rows available.")
+        else:
+            st.info("Wind column not found.")
+
+    with row2_right:
+        if "wind_kph" in ref_df.columns:
+            wind_cat_df = ref_df.dropna(subset=["wind_kph", pm25_col]).copy()
+            if not wind_cat_df.empty:
+                wind_cat_df["wind_category"] = pd.cut(
+                    wind_cat_df["wind_kph"],
+                    bins=[-float("inf"), 10, 25, float("inf")],
+                    labels=["Low Wind", "Medium Wind", "High Wind"],
+                )
+                by_wind = (
+                    wind_cat_df.groupby("wind_category", as_index=False)[pm25_col]
+                    .mean()
+                    .sort_values("wind_category")
+                )
+                fig_wind_bar = px.bar(
+                    by_wind,
+                    x="wind_category",
+                    y=pm25_col,
+                    title="Average PM2.5 by Wind Category",
+                    labels={"wind_category": "Wind Category", pm25_col: "PM2.5 (Average)"},
+                )
+                st.plotly_chart(fig_wind_bar, use_container_width=True)
+            else:
+                st.info("No wind/PM2.5 rows available.")
+        else:
+            st.info("Wind column not found.")
+
+    row3_left, row3_right = st.columns(2)
+    with row3_left:
+        if "humidity" in ref_df.columns:
+            hum_df = ref_df.dropna(subset=["humidity", pm25_col]).copy()
+            if not hum_df.empty:
+                hum_df["humidity_category"] = pd.cut(
+                    hum_df["humidity"],
+                    bins=[-float("inf"), 40, 70, float("inf")],
+                    labels=["Low (<40%)", "Medium (40-70%)", "High (>70%)"],
+                )
+                by_hum = hum_df.groupby("humidity_category", as_index=False)[pm25_col].mean()
+                fig_hum = px.bar(
+                    by_hum,
+                    x="humidity_category",
+                    y=pm25_col,
+                    title="Average PM2.5 by Humidity Category",
+                    labels={"humidity_category": "Humidity Category", pm25_col: "PM2.5 (Average)"},
+                )
+                st.plotly_chart(fig_hum, use_container_width=True)
+            else:
+                st.info("No humidity/PM2.5 rows available.")
+        else:
+            st.info("Humidity column not found.")
+
+    with row3_right:
+        if "temperature_c" in ref_df.columns:
+            temp_df = ref_df.dropna(subset=["temperature_c", pm25_col]).copy()
+            if not temp_df.empty:
+                temp_df = temp_df.sample(min(len(temp_df), 2500), random_state=42)
+                fig_temp = px.scatter(
+                    temp_df,
+                    x="temperature_c",
+                    y=pm25_col,
+                    title="Temperature vs PM2.5",
+                    labels={"temperature_c": "Temperature (C)", pm25_col: "PM2.5"},
+                    opacity=0.55,
+                )
+                st.plotly_chart(fig_temp, use_container_width=True)
+            else:
+                st.info("No temperature/PM2.5 rows available.")
+        else:
+            st.info("Temperature column not found.")
+
+    row4_left, row4_right = st.columns(2)
+    with row4_left:
+        if "last_updated" in ref_df.columns and pd.api.types.is_datetime64_any_dtype(ref_df["last_updated"]):
+            trend_df = (
+                ref_df.dropna(subset=["last_updated"])
+                .assign(month=ref_df["last_updated"].dt.to_period("M").astype(str))
+                .groupby("month", as_index=False)[pm25_col]
+                .mean()
+            )
+            if not trend_df.empty:
+                fig_trend = px.line(
+                    trend_df,
+                    x="month",
+                    y=pm25_col,
+                    title="Average PM2.5 by Month",
+                    labels={"month": "Month", pm25_col: "PM2.5 (Average)"},
+                )
+                st.plotly_chart(fig_trend, use_container_width=True)
+            else:
+                st.info("No valid timestamps for PM2.5 trend.")
+        else:
+            st.info("`last_updated` column not available for trend.")
+
+    with row4_right:
+        if "location_name" in ref_df.columns:
+            by_city = (
+                ref_df.groupby("location_name", as_index=False)[pm25_col]
+                .mean()
+                .sort_values(pm25_col, ascending=False)
+                .head(25)
+            )
+            if not by_city.empty:
+                fig_city = px.bar(
+                    by_city.sort_values(pm25_col, ascending=True),
+                    x=pm25_col,
+                    y="location_name",
+                    orientation="h",
+                    title="Most Polluted City (Top 25 by Avg PM2.5)",
+                    labels={"location_name": "City", pm25_col: "PM2.5 (Average)"},
+                )
+                st.plotly_chart(fig_city, use_container_width=True)
+            else:
+                st.info("No city rows available for PM2.5 ranking.")
+        else:
+            st.info("`location_name` column not found.")
+
+    if aqi_col is not None:
+        aqi_df = ref_df.dropna(subset=[aqi_col]).copy()
+        if not aqi_df.empty:
+            aqi_vals = pd.to_numeric(aqi_df[aqi_col], errors="coerce").clip(lower=1, upper=6).round()
+            aqi_map = {
+                1: "Good",
+                2: "Moderate",
+                3: "Unhealthy for Sensitive Groups",
+                4: "Unhealthy",
+                5: "Very Unhealthy",
+                6: "Hazardous",
+            }
+            aqi_df["aqi_label"] = aqi_vals.map(aqi_map)
+
+            row5_left, row5_right = st.columns(2)
+            with row5_left:
+                aqi_counts = (
+                    aqi_df["aqi_label"]
+                    .value_counts()
+                    .rename_axis("aqi_label")
+                    .reset_index(name="count")
+                )
+                if not aqi_counts.empty:
+                    fig_aqi_pie = px.pie(
+                        aqi_counts,
+                        names="aqi_label",
+                        values="count",
+                        hole=0.45,
+                        title="Average AQI Distribution",
+                    )
+                    st.plotly_chart(fig_aqi_pie, use_container_width=True)
+                else:
+                    st.info("AQI distribution unavailable.")
+
+            with row5_right:
+                if "country" in aqi_df.columns:
+                    country_aqi = (
+                        aqi_df.groupby(["country", "aqi_label"])
+                        .size()
+                        .reset_index(name="count")
+                    )
+                    top_countries = (
+                        country_aqi.groupby("country", as_index=False)["count"]
+                        .sum()
+                        .sort_values("count", ascending=False)
+                        .head(12)["country"]
+                        .tolist()
+                    )
+                    country_aqi = country_aqi[country_aqi["country"].isin(top_countries)]
+                    fig_aqi_stack = px.bar(
+                        country_aqi,
+                        x="country",
+                        y="count",
+                        color="aqi_label",
+                        title="Distribution of AQI Levels by Country",
+                        labels={"count": "Count", "country": "Country", "aqi_label": "AQI"},
+                    )
+                    st.plotly_chart(fig_aqi_stack, use_container_width=True)
+                else:
+                    st.info("Country column not found for AQI country chart.")
+
+
+@st.cache_resource(show_spinner=False)
+def train_epa_index_classifier(df: pd.DataFrame) -> dict[str, Any]:
+    aqi_col = find_aqi_target(df)
+    if aqi_col is None:
+        raise ValueError("No AQI column available. Expected `air_quality_us_epa_index`.")
+
+    model_df = df.copy()
+    aqi_vals = pd.to_numeric(model_df[aqi_col], errors="coerce").clip(lower=1, upper=6).round()
+    model_df["aqi_class"] = aqi_vals.astype("Int64").astype(str)
+    model_df = model_df[model_df["aqi_class"] != "<NA>"].copy()
+
+    if len(model_df) < 300:
+        raise ValueError("Not enough labeled rows for EPA classification.")
+
+    excluded = {"aqi_class", aqi_col, "last_updated", "sunrise", "sunset", "moonrise", "moonset"}
+    pm25_col = find_pm25_target(model_df)
+    if pm25_col is not None:
+        excluded.add(pm25_col)
+
+    feature_df = model_df[[c for c in model_df.columns if c not in excluded]].copy()
+    numeric_cols = feature_df.select_dtypes(include=["number"]).columns.tolist()
+    categorical_cols = feature_df.select_dtypes(include=["object", "category"]).columns.tolist()
+    categorical_cols = [c for c in categorical_cols if feature_df[c].nunique(dropna=True) <= 100]
+
+    selected_cols = numeric_cols + categorical_cols
+    if not selected_cols:
+        raise ValueError("No usable features available for EPA classification.")
+
+    X = feature_df[selected_cols]
+    y = model_df["aqi_class"]
+    if y.nunique() < 2:
+        raise ValueError("EPA classification requires at least two classes.")
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), numeric_cols),
+            (
+                "cat",
+                Pipeline(
+                    [
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        ("encoder", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
+                categorical_cols,
+            ),
+        ]
+    )
+
+    classifier = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("model", RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)),
+        ]
+    )
+    classifier.fit(X_train, y_train)
+    predictions = classifier.predict(X_test)
+
+    return {
+        "accuracy": accuracy_score(y_test, predictions),
+        "f1_macro": f1_score(y_test, predictions, average="macro"),
+        "actual_vs_pred": pd.DataFrame({"actual": y_test.values, "predicted": predictions}),
+        "class_counts": y.value_counts().sort_index().rename_axis("class").reset_index(name="count"),
+    }
+
+
+def epa_index_classifier_tab(df: pd.DataFrame) -> None:
+    st.subheader("EPA Index Classifier")
+    st.caption("Multiclass classification for `air_quality_us_epa_index` (classes 1-6).")
+
+    try:
+        with st.spinner("Training EPA index classifier..."):
+            trained = train_epa_index_classifier(df)
+    except Exception as exc:
+        st.warning(f"EPA classifier unavailable: {exc}")
+        return
+
+    c1, c2 = st.columns(2)
+    c1.metric("Accuracy", f"{trained['accuracy']:.3f}")
+    c2.metric("F1 (macro)", f"{trained['f1_macro']:.3f}")
+
+    st.plotly_chart(
+        px.bar(
+            trained["class_counts"],
+            x="class",
+            y="count",
+            title="EPA Class Distribution",
+            labels={"class": "EPA Class", "count": "Rows"},
+        ),
+        use_container_width=True,
+    )
+
+    compare = trained["actual_vs_pred"].copy()
+    compare["pair"] = compare["actual"] + " -> " + compare["predicted"]
+    pair_counts = compare["pair"].value_counts().head(20).rename_axis("pair").reset_index(name="count")
+    st.plotly_chart(
+        px.bar(
+            pair_counts.sort_values("count", ascending=True),
+            x="count",
+            y="pair",
+            orientation="h",
+            title="Top Outcomes (Actual -> Predicted)",
+            labels={"count": "Rows", "pair": "Outcome"},
+        ),
+        use_container_width=True,
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def train_unhealthy_risk_classifier(df: pd.DataFrame, threshold: float) -> dict[str, Any]:
+    pm25_col = find_pm25_target(df)
+    if pm25_col is None:
+        raise ValueError("No PM2.5 column available for risk classification.")
+
+    model_df = df.copy()
+    pm25_vals = pd.to_numeric(model_df[pm25_col], errors="coerce")
+    model_df = model_df[pm25_vals.notna()].copy()
+    model_df["risk_label"] = np.where(pm25_vals[pm25_vals.notna()] > threshold, "Unhealthy", "Healthy")
+
+    if len(model_df) < 300:
+        raise ValueError("Not enough rows for risk classification.")
+    if model_df["risk_label"].nunique() < 2:
+        raise ValueError("Only one class present after thresholding. Change threshold.")
+
+    excluded = {"risk_label", pm25_col, "last_updated", "sunrise", "sunset", "moonrise", "moonset"}
+    aqi_col = find_aqi_target(model_df)
+    if aqi_col is not None:
+        excluded.add(aqi_col)
+
+    feature_df = model_df[[c for c in model_df.columns if c not in excluded]].copy()
+    numeric_cols = feature_df.select_dtypes(include=["number"]).columns.tolist()
+    categorical_cols = feature_df.select_dtypes(include=["object", "category"]).columns.tolist()
+    categorical_cols = [c for c in categorical_cols if feature_df[c].nunique(dropna=True) <= 100]
+
+    selected_cols = numeric_cols + categorical_cols
+    if not selected_cols:
+        raise ValueError("No usable features available for risk classification.")
+
+    X = feature_df[selected_cols]
+    y = model_df["risk_label"].astype(str)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), numeric_cols),
+            (
+                "cat",
+                Pipeline(
+                    [
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        ("encoder", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
+                categorical_cols,
+            ),
+        ]
+    )
+
+    classifier = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("model", RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)),
+        ]
+    )
+    classifier.fit(X_train, y_train)
+    predictions = classifier.predict(X_test)
+
+    return {
+        "accuracy": accuracy_score(y_test, predictions),
+        "f1_macro": f1_score(y_test, predictions, average="macro"),
+        "actual_vs_pred": pd.DataFrame({"actual": y_test.values, "predicted": predictions}),
+        "class_counts": y.value_counts().rename_axis("class").reset_index(name="count"),
+    }
+
+
+def unhealthy_risk_classifier_tab(df: pd.DataFrame) -> None:
+    st.subheader("Unhealthy Risk Classifier")
+    st.caption("Binary classification for PM2.5 unhealthy risk.")
+    threshold = st.selectbox(
+        "Risk threshold (PM2.5)",
+        options=[35.4, 55.4],
+        index=1,
+        help="35.4 = USG threshold, 55.4 = Unhealthy threshold.",
+    )
+
+    try:
+        with st.spinner("Training unhealthy risk classifier..."):
+            trained = train_unhealthy_risk_classifier(df, float(threshold))
+    except Exception as exc:
+        st.warning(f"Risk classifier unavailable: {exc}")
+        return
+
+    c1, c2 = st.columns(2)
+    c1.metric("Accuracy", f"{trained['accuracy']:.3f}")
+    c2.metric("F1 (macro)", f"{trained['f1_macro']:.3f}")
+
+    st.plotly_chart(
+        px.bar(
+            trained["class_counts"],
+            x="class",
+            y="count",
+            title=f"Risk Class Distribution (threshold {threshold})",
+            labels={"class": "Class", "count": "Rows"},
+        ),
+        use_container_width=True,
+    )
+
+    compare = trained["actual_vs_pred"].copy()
+    compare["pair"] = compare["actual"] + " -> " + compare["predicted"]
+    pair_counts = compare["pair"].value_counts().rename_axis("pair").reset_index(name="count")
+    st.plotly_chart(
+        px.bar(
+            pair_counts.sort_values("count", ascending=True),
+            x="count",
+            y="pair",
+            orientation="h",
+            title="Prediction Outcomes (Actual -> Predicted)",
+            labels={"count": "Rows", "pair": "Outcome"},
+        ),
+        use_container_width=True,
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -637,7 +1127,7 @@ def pm25_prediction_tab(df: pd.DataFrame) -> None:
     )
     st.dataframe(
         trained["scores"].rename(columns={"mae": "MAE", "r2": "R2"}).reset_index(drop=True),
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )
 
@@ -649,7 +1139,7 @@ def pm25_prediction_tab(df: pd.DataFrame) -> None:
         labels={"actual": "Actual PM2.5", "predicted": "Predicted PM2.5"},
         opacity=0.5,
     )
-    st.plotly_chart(comparison_fig, width="stretch")
+    st.plotly_chart(comparison_fig, use_container_width=True)
 
     st.markdown("### Predict a single sample")
     X = trained["X"]
@@ -720,7 +1210,9 @@ def main() -> None:
         st.warning("No rows match the current filters.")
         return
 
-    tab_dashboard, tab_predict = st.tabs(["Dashboard", "PM2.5 Predictor"])
+    tab_dashboard, tab_quicksight, tab_predict, tab_epa, tab_risk = st.tabs(
+        ["Dashboard", "QuickSight", "PM2.5 Predictor", "EPA Index Classifier", "Unhealthy Risk Classifier"]
+    )
 
     with tab_dashboard:
         metric_cards(filtered_df)
@@ -728,8 +1220,20 @@ def main() -> None:
         pm25_visual_section(filtered_df)
         table_section(filtered_df)
 
+    with tab_quicksight:
+        try:
+            reference_dashboard_section(filtered_df)
+        except Exception as exc:
+            st.error(f"QuickSight error: {exc}")
+
     with tab_predict:
         pm25_prediction_tab(filtered_df)
+
+    with tab_epa:
+        epa_index_classifier_tab(filtered_df)
+
+    with tab_risk:
+        unhealthy_risk_classifier_tab(filtered_df)
 
 
 if __name__ == "__main__":

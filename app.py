@@ -14,7 +14,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, r2_score
+from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
@@ -1245,8 +1245,10 @@ def train_pm25_model(df: pd.DataFrame, target_col: str) -> dict[str, Any]:
         model.fit(X_train, y_train)
         predictions = model.predict(X_test)
         mae = mean_absolute_error(y_test, predictions)
+        mse = mean_squared_error(y_test, predictions)
+        rmse = float(np.sqrt(mse))
         r2 = r2_score(y_test, predictions)
-        rows.append({"model": model_name, "mae": mae, "r2": r2})
+        rows.append({"model": model_name, "mae": mae, "mse": mse, "rmse": rmse, "r2": r2})
 
         if r2 > best_r2:
             best_r2 = r2
@@ -1286,10 +1288,12 @@ def pm25_prediction_tab(df: pd.DataFrame) -> None:
     with st.spinner("Training PM2.5 model..."):
         trained = train_pm25_model(df, target_col)
 
-    metric_col1, metric_col2 = st.columns(2)
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
     best_row = trained["scores"].iloc[0]
     metric_col1.metric("Best Model", str(trained["best_model_name"]))
     metric_col2.metric("Best R²", f"{best_row['r2']:.3f}")
+    metric_col3.metric("RMSE", f"{best_row['rmse']:.3f}")
+    metric_col4.metric("MSE", f"{best_row['mse']:.3f}")
 
     st.caption(
         "Models tested: Linear Regression, Random Forest, Gradient Boosting. "
@@ -1297,7 +1301,9 @@ def pm25_prediction_tab(df: pd.DataFrame) -> None:
         "Use this for exploration, not regulatory forecasting."
     )
     st.dataframe(
-        trained["scores"].rename(columns={"mae": "MAE", "r2": "R2"}).reset_index(drop=True),
+        trained["scores"].rename(
+            columns={"mae": "MAE", "mse": "MSE", "rmse": "RMSE", "r2": "R2"}
+        ).reset_index(drop=True),
         use_container_width=True,
         hide_index=True,
     )

@@ -1228,6 +1228,28 @@ def train_pm25_model(df: pd.DataFrame, target_col: str) -> dict[str, Any]:
         ("RandomForest", RandomForestRegressor(n_estimators=250, random_state=42, n_jobs=-1)),
         ("GradientBoosting", GradientBoostingRegressor(random_state=42)),
     ]
+    xgb_status = "not attempted"
+    try:
+        from xgboost import XGBRegressor
+
+        model_defs.append(
+            (
+                "XGBoost",
+                XGBRegressor(
+                    n_estimators=300,
+                    learning_rate=0.05,
+                    max_depth=6,
+                    subsample=0.9,
+                    colsample_bytree=0.9,
+                    objective="reg:squarederror",
+                    random_state=42,
+                    n_jobs=-1,
+                ),
+            )
+        )
+        xgb_status = "enabled"
+    except Exception as exc:
+        xgb_status = f"skipped: {exc}"
 
     rows: list[dict[str, Any]] = []
     best_r2 = float("-inf")
@@ -1259,6 +1281,7 @@ def train_pm25_model(df: pd.DataFrame, target_col: str) -> dict[str, Any]:
     return {
         "model": best_model,
         "best_model_name": best_name,
+        "xgb_status": xgb_status,
         "X": X,
         "defaults": {
             col: (float(X[col].median()) if pd.api.types.is_numeric_dtype(X[col]) else (X[col].dropna().astype(str).mode().iloc[0] if not X[col].dropna().empty else ""))
@@ -1295,11 +1318,14 @@ def pm25_prediction_tab(df: pd.DataFrame) -> None:
     metric_col3.metric("RMSE", f"{best_row['rmse']:.3f}")
     metric_col4.metric("MSE", f"{best_row['mse']:.3f}")
 
+    models_tested = ", ".join(trained["scores"]["model"].astype(str).tolist())
     st.caption(
-        "Models tested: Linear Regression, Random Forest, Gradient Boosting. "
+        f"Models tested: {models_tested}. "
         f"Best model selected: {trained['best_model_name']}. "
         "Use this for exploration, not regulatory forecasting."
     )
+    if str(trained.get("xgb_status", "")).startswith("skipped:"):
+        st.info("XGBoost unavailable in current runtime; using sklearn models.")
     st.dataframe(
         trained["scores"].rename(
             columns={"mae": "MAE", "mse": "MSE", "rmse": "RMSE", "r2": "R2"}

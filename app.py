@@ -40,6 +40,7 @@ AQI_CLASS_COLORS = {
     "Very Unhealthy": "#8e44ad",
     "Hazardous": "#800000",
 }
+MODEL_MAX_ROWS = 20000
 COLUMN_ALIASES = {
     "temperature_c": ["temperature_c", "temperature_celsius"],
     "temperature_f": ["temperature_f", "temperature_fahrenheit"],
@@ -103,11 +104,11 @@ def sidebar_data_source() -> pd.DataFrame | None:
 
 def build_filters(df: pd.DataFrame) -> pd.DataFrame:
     st.sidebar.header("Sampling")
-    sample_mode = st.sidebar.radio("Dataset mode", ["Full dataset", "Random sample"], index=0)
+    sample_mode = st.sidebar.radio("Dataset mode", ["Full dataset", "Random sample"], index=1)
     if sample_mode == "Random sample":
         max_rows = int(len(df))
         min_rows = 1 if max_rows < 100 else 100
-        default_rows = min(5000, max_rows)
+        default_rows = min(10000, max_rows)
         step = 1 if max_rows < 100 else 100
         sample_rows = st.sidebar.slider("Sample rows", min_value=min_rows, max_value=max_rows, value=default_rows, step=step)
         random_seed = st.sidebar.number_input("Random seed", min_value=0, max_value=999999, value=42, step=1)
@@ -152,9 +153,12 @@ def build_filters(df: pd.DataFrame) -> pd.DataFrame:
             )
             if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
                 start_date, end_date = selected_dates
+                # Keep datetime64 comparisons vectorized; .dt.date is significantly slower on large frames.
+                start_ts = pd.Timestamp(start_date)
+                end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
                 filtered = filtered[
-                    (filtered["last_updated"].dt.date >= start_date)
-                    & (filtered["last_updated"].dt.date <= end_date)
+                    (filtered["last_updated"] >= start_ts)
+                    & (filtered["last_updated"] <= end_ts)
                 ]
 
     with st.sidebar.expander("Advanced filters"):
@@ -507,6 +511,12 @@ def find_aqi_target(df: pd.DataFrame) -> str | None:
         if candidate in df.columns:
             return candidate
     return None
+
+
+def maybe_downsample_training(df: pd.DataFrame, max_rows: int = MODEL_MAX_ROWS) -> pd.DataFrame:
+    if len(df) <= max_rows:
+        return df
+    return df.sample(n=max_rows, random_state=42)
 
 
 def reference_dashboard_section(df: pd.DataFrame) -> None:
@@ -982,7 +992,7 @@ def train_epa_index_classifier(df: pd.DataFrame) -> dict[str, Any]:
     if aqi_col is None:
         raise ValueError("No AQI column available. Expected `air_quality_us_epa_index`.")
 
-    model_df = df.copy()
+    model_df = maybe_downsample_training(df.copy())
     aqi_vals = pd.to_numeric(model_df[aqi_col], errors="coerce").clip(lower=1, upper=6).round()
     model_df["aqi_code"] = aqi_vals.astype("Int64")
     model_df["aqi_class"] = model_df["aqi_code"].map(AQI_CLASS_LABELS)
@@ -1031,7 +1041,7 @@ def train_epa_index_classifier(df: pd.DataFrame) -> dict[str, Any]:
     classifier = Pipeline(
         steps=[
             ("preprocessor", preprocessor),
-            ("model", RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)),
+            ("model", RandomForestClassifier(n_estimators=180, random_state=42, n_jobs=-1)),
         ]
     )
     classifier.fit(X_train, y_train)
@@ -1067,11 +1077,38 @@ def epa_index_classifier_tab(df: pd.DataFrame) -> None:
     st.subheader("EPA Index Classifier")
     st.caption("Multiclass classification for AQI categories (color-coded).")
 
-    try:
-        with st.spinner("Training EPA index classifier..."):
-            trained = train_epa_index_classifier(df)
-    except Exception as exc:
-        st.warning(f"EPA classifier unavailable: {exc}")
+    aqi_col = find_aqi_target(df)
+    if aqi_col is None:
+        st.warning("EPA classifier unavailable: No AQI column available.")
+        return
+
+    aqi_series = pd.to_numeric(df[aqi_col], errors="coerce")
+    current_signature = (
+        len(df),
+        float(aqi_series.dropna().mean()) if not aqi_series.dropna().empty else float("nan"),
+    )
+    model_key = "epa_trained_model"
+    sig_key = "epa_trained_signature"
+    signature_changed = st.session_state.get(sig_key) != current_signature
+    retrain_clicked = st.button("Train / Refresh EPA Classifier", key="epa_train_button")
+
+    if model_key not in st.session_state:
+        retrain_clicked = True
+    elif signature_changed:
+        st.info("Data changed since last EPA training. Click the button to refresh the model.")
+
+    if retrain_clicked:
+        try:
+            with st.spinner("Training EPA index classifier..."):
+                st.session_state[model_key] = train_epa_index_classifier(df)
+                st.session_state[sig_key] = current_signature
+        except Exception as exc:
+            st.warning(f"EPA classifier unavailable: {exc}")
+            return
+
+    trained = st.session_state.get(model_key)
+    if trained is None:
+        st.info("Click 'Train / Refresh EPA Classifier' to build the model.")
         return
 
     c1, c2 = st.columns(2)
@@ -1188,7 +1225,7 @@ def epa_index_classifier_tab(df: pd.DataFrame) -> None:
 
 @st.cache_resource(show_spinner=False)
 def train_pm25_model(df: pd.DataFrame, target_col: str) -> dict[str, Any]:
-    model_df = df.dropna(subset=[target_col]).copy()
+    model_df = maybe_downsample_training(df.dropna(subset=[target_col]).copy())
 
     # Remove columns that are not useful for tabular regression.
     excluded = {target_col, "last_updated", "sunrise", "sunset", "moonrise", "moonset"}
@@ -1225,7 +1262,7 @@ def train_pm25_model(df: pd.DataFrame, target_col: str) -> dict[str, Any]:
 
     model_defs: list[tuple[str, Any]] = [
         ("LinearRegression", LinearRegression()),
-        ("RandomForest", RandomForestRegressor(n_estimators=250, random_state=42, n_jobs=-1)),
+        ("RandomForest", RandomForestRegressor(n_estimators=160, random_state=42, n_jobs=-1)),
         ("GradientBoosting", GradientBoostingRegressor(random_state=42)),
     ]
     xgb_status = "not attempted"
@@ -1236,7 +1273,7 @@ def train_pm25_model(df: pd.DataFrame, target_col: str) -> dict[str, Any]:
             (
                 "XGBoost",
                 XGBRegressor(
-                    n_estimators=300,
+                    n_estimators=200,
                     learning_rate=0.05,
                     max_depth=6,
                     subsample=0.9,
@@ -1308,8 +1345,31 @@ def pm25_prediction_tab(df: pd.DataFrame) -> None:
         st.warning("Not enough PM2.5 rows to train a reliable model.")
         return
 
-    with st.spinner("Training PM2.5 model..."):
-        trained = train_pm25_model(df, target_col)
+    pm25_series = pd.to_numeric(df[target_col], errors="coerce")
+    current_signature = (
+        target_col,
+        len(df),
+        float(pm25_series.dropna().mean()) if not pm25_series.dropna().empty else float("nan"),
+    )
+    model_key = "pm25_trained_model"
+    sig_key = "pm25_trained_signature"
+    signature_changed = st.session_state.get(sig_key) != current_signature
+    retrain_clicked = st.button("Train / Refresh PM2.5 Model", key="pm25_train_button")
+
+    if model_key not in st.session_state:
+        retrain_clicked = True
+    elif signature_changed:
+        st.info("Data changed since last PM2.5 training. Click the button to refresh the model.")
+
+    if retrain_clicked:
+        with st.spinner("Training PM2.5 model..."):
+            st.session_state[model_key] = train_pm25_model(df, target_col)
+            st.session_state[sig_key] = current_signature
+
+    trained = st.session_state.get(model_key)
+    if trained is None:
+        st.info("Click 'Train / Refresh PM2.5 Model' to build the model.")
+        return
 
     metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
     best_row = trained["scores"].iloc[0]
